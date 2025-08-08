@@ -166,6 +166,80 @@ class SequenceBlock(nn.Module):
             x = self.norm(x)
         return x
 
+class CustomEmbedding(nn.Module):
+
+    def __init__(self, num_embeddings, embedding_dim, padding_idx=0):
+        super(CustomEmbedding, self).__init__()
+        self.embedding = nn.Embedding(num_embeddings, embedding_dim, padding_idx=padding_idx)
+
+    def forward(self, x):
+        token_ids = x[..., 0].long()
+        return self.embedding(token_ids)
+
+class StackedModel(nn.Module):
+
+    def __init__(
+           self,
+        layer_cls: nn.Module,   # The class for the main sequential layer (e.g., S4Layer)
+        layer_args: dict,       # Hyperparameters for the layer_cls
+        d_input: int,           # Input dimension (e.g., vocab size or number of features)
+        d_output: int,          # Output dimension (e.g., number of classes)
+        d_model: int,           # The model's internal dimension
+        n_layers: int,          # The number of sequence blocks to stack
+        prenorm: bool = True,
+        dropout: float = 0.0,
+        embedding: bool = False,      # Use Embedding encoder for token IDs
+        classification: bool = False, # Pool outputs for classification
+        decode: bool = False, 
+    ):
+        super(StackedModel, self).__init__()
+        self.embedding = embedding
+        self.classification = classification
+        self.decode = decode
+
+        if embedding:
+            self.encoder = CustomEmbedding(d_input, d_model)
+        else:
+            self.encoder = nn.Linear(d_input, d_model)
+
+        self.layers = nn.ModuleList([
+            SequenceBlock(
+                layer_cls,
+                layer_args,
+                dropout=dropout,
+                d_model=d_model,
+                prenorm=prenorm,
+                glu=True,
+                decode=decode
+            ) for _ in range(n_layers)
+        ])
+
+        self.decoder = nn.Linear(d_model, d_output)
+
+    def forward(self, x):
+        if not self.classification:
+            if not self.embedding:
+                x = x / 255
+            
+            if not self.decode:
+                x = F.pad(x[:, :-1, :], (0, 0, 1, 0))
+        
+        x = self.encoder(x)
+        for layer in self.layers:
+            x = layer(x)
+        
+        if self.classification:
+            x = x.mean(dim=1)
+        
+        x = self.decoder(x)
+        return F.softmax(x, dim=-1)
+
+def make_HiPPO(N):
+    P = torch.sqrt(1 + 2 * torch.arange(N, dtype=torch.float32))
+    A = P.unsqueeze(1) @ P.unsqueeze(0)
+    A = torch.tril(A) - torch.diag(torch.arange(N, dtype=torch.float32))
+    return -A
+
 def example_mass(k, b, m):
     A = torch.tensor([[0, 1], [-k/m, -b/m]], dtype=torch.float32)
     B = torch.tensor([[0], [1/m]], dtype=torch.float32)
@@ -211,8 +285,65 @@ def example_SSM():
     anim = camera.animate()
     anim.save("images/line.gif", dpi=150, writer="imagemagick")
 
+def example_legendre(N=8):
+    # Random hidden state as coefficients
+    import numpy as np
+    import numpy.polynomial.legendre
+    import matplotlib.pyplot as plt
+    import seaborn
+
+    x = (np.random.rand(N) - 0.5) * 2
+    t = np.linspace(-1, 1, 100)
+    
+    # The composite function f(t)
+    f = np.polynomial.legendre.Legendre(x)(t)
+
+    # Plot
+    seaborn.set_context("talk")
+    fig = plt.figure(figsize=(20, 10))
+    
+    # Correctly create a 3D axes object
+    ax = fig.add_subplot(projection="3d")
+    
+    # Plot the composite function f(t) in a plane in the distance
+    ax.plot(t, f, zs=N * 100, zdir="y", c="r")
+    
+    for i in range(N):
+        # Create coefficients for a single basis function P_i(t)
+        coef = [0] * N
+        coef[N - i - 1] = 1
+        
+        # Plot the i-th basis function P_i(t)
+        f_basis = numpy.polynomial.legendre.Legendre(coef)(t)
+        ax.plot(t, f_basis, zs=100 * i, zdir="y", c="b", alpha=0.5)
+        
+        # Plot the i-th coefficient x_i as a bar
+        ax.bar(
+            [100 * i],          # Position along the y-axis
+            [x[i]],             # Height of the bar (the coefficient value)
+            zs=-1,              # Position on the x-axis (at the back)
+            zdir="x",           # Direction of the z-axis for the bar
+            label=f"x{i}",
+            color="brown",
+            fill=False,
+            width=50,
+        )
+
+    # Aesthetics
+    ax.set_zlim(-4, 4)
+    ax.set_yticks([])
+    ax.set_zticks([])
+    ax.view_init(elev=40.0, azim=-45)
+    
+    # In case the "images" directory doesn't exist
+    import os
+    os.makedirs("images", exist_ok=True)
+    
+    fig.savefig("images/leg.png")
+    plt.show()
+
 def main():
-    test_cnn_is_rnn()
+    example_legendre()
 
 if __name__ == "__main__":
     main()
